@@ -6,6 +6,12 @@ import pandas as pd
 from knowledge_based_model import get_initial_recommendations, get_collaborative_recommendations
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import desc, func
+from flask import abort
+
+# Move these to the top of the file, right after the imports and before app initialization
+movies_df = None
+ratings_df = None
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///recommender.db'  # Use PostgreSQL in production
@@ -206,15 +212,168 @@ def like_movie(current_user):
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+@app.route('/logout', methods=['POST'])
+@token_required
+def logout(current_user):
+    # In a more complete implementation, you might want to blacklist the token
+    return jsonify({'message': 'Successfully logged out'})
+
+@app.route('/user/preferences', methods=['POST'])
+@token_required
+def update_preferences(current_user):
+    try:
+        data = request.json
+        
+        # Update allowed fields
+        allowed_fields = ['age', 'gender', 'occupation', 'favorite_genres', 'preferred_year_range']
+        for field in allowed_fields:
+            if field in data:
+                if field == 'favorite_genres':
+                    genres = data[field]
+                    if isinstance(genres, list):
+                        genres = ','.join(genres)
+                    current_user.favorite_genres = genres
+                elif field == 'preferred_year_range':
+                    current_user.preferred_year_min = data[field][0]
+                    current_user.preferred_year_max = data[field][1]
+                else:
+                    setattr(current_user, field, data[field])
+        
+        db.session.commit()
+        return jsonify({'message': 'Preferences updated successfully'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/content', methods=['GET'])
+@token_required
+def get_content(current_user):
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        
+        # Get paginated movies from movies_df
+        total_movies = len(movies_df)
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        
+        movies_page = movies_df.iloc[start_idx:end_idx]
+        
+        return jsonify({
+            'content': movies_page.to_dict('records'),
+            'total': total_movies,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total_movies + per_page - 1) // per_page
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/content/add', methods=['POST'])
+@token_required
+def add_content(current_user):
+    global movies_df
+    try:
+        if not current_user.is_admin:
+            return jsonify({'error': 'Admin access required'}), 403
+            
+        data = request.json
+        required_fields = ['title', 'genres', 'year']
+        
+        if not all(k in data for k in required_fields):
+            return jsonify({'error': 'Missing required fields'}), 400
+            
+        # Add new movie to movies_df
+        new_movie = pd.DataFrame([{
+            'movieId': len(movies_df) + 1,
+            'title': data['title'],
+            'genres': data['genres'],
+            'year': data['year']
+        }])
+        
+        movies_df = pd.concat([movies_df, new_movie], ignore_index=True)
+        
+        return jsonify({'message': 'Content added successfully'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/recommendations/trending', methods=['GET'])
+@token_required
+def get_trending(current_user):
+    try:
+        days = request.args.get('days', 30, type=int)
+        limit = request.args.get('limit', 10, type=int)
+        
+        # Calculate trending based on recent ratings and interactions
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        
+        trending = db.session.query(
+            UserLike.movie_id,
+            func.count(UserLike.id).label('interaction_count'),
+            func.avg(UserLike.rating).label('avg_rating')
+        ).filter(
+            UserLike.created_at >= cutoff_date
+        ).group_by(
+            UserLike.movie_id
+        ).order_by(
+            desc('interaction_count')
+        ).limit(limit).all()
+        
+        # Get movie details for trending items
+        trending_movies = []
+        for movie_id, count, avg_rating in trending:
+            movie_data = movies_df[movies_df['movieId'] == movie_id].iloc[0].to_dict()
+            movie_data['interaction_count'] = count
+            movie_data['average_rating'] = float(avg_rating) if avg_rating else None
+            trending_movies.append(movie_data)
+            
+        return jsonify(trending_movies)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/interaction/rate', methods=['POST'])
+@token_required
+def rate_movie(current_user):
+    try:
+        data = request.json
+        movie_id = data.get('movie_id')
+        rating = data.get('rating')
+        
+        if not movie_id or not rating:
+            return jsonify({'error': 'Missing movie_id or rating'}), 400
+            
+        if not (0 <= rating <= 5):
+            return jsonify({'error': 'Rating must be between 0 and 5'}), 400
+            
+        # Update existing rating or create new one
+        like = UserLike.query.filter_by(
+            user_id=current_user.id,
+            movie_id=movie_id
+        ).first()
+        
+        if like:
+            like.rating = rating
+        else:
+            like = UserLike(
+                user_id=current_user.id,
+                movie_id=movie_id,
+                rating=rating
+            )
+            db.session.add(like)
+            
+        db.session.commit()
+        return jsonify({'message': 'Rating recorded successfully'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     # Create the database and tables
     with app.app_context():
-        # Drop all tables first to ensure clean slate
         db.drop_all()
-        # Create all tables
         db.create_all()
         print("Database initialized successfully!")
-        
+    
     # Load your DataFrames
     movies_df = pd.read_csv('./ml-32m/movies.csv')
     ratings_df = pd.read_csv('./ml-32m/ratings.csv')
