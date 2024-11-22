@@ -196,7 +196,7 @@ def get_recommendations(current_user):
         user_likes = UserLike.query.filter_by(user_id=current_user.id).all()
         
         # Cold start: Use knowledge-based recommendations
-        if len(user_likes) < 5:
+        if len(user_likes) > 5:
             user_profile = {
                 'age': current_user.age,
                 'gender': current_user.gender,
@@ -209,6 +209,7 @@ def get_recommendations(current_user):
         else:
             # Use collaborative filtering once we have enough user interactions
             liked_movie_ids = [like.movie_id for like in user_likes]
+            print(liked_movie_ids)
             recommendations = get_collaborative_recommendations(
                 current_user.id, 
                 ratings_df, 

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import csr_matrix
 
 # Load the datasets
 movies_df = pd.read_csv('ml-32m/movies.csv')
@@ -64,34 +65,51 @@ def get_initial_recommendations(user_profile, movies_df, n_recommendations=10):
     return recommendations[['title', 'genres']]
 
 def get_collaborative_recommendations(user_id, ratings_df, movies_df, n_recommendations=10):
-    """
-    Get movie recommendations using collaborative filtering
-    """
-    # Create user-item matrix
-    user_item_matrix = ratings_df.pivot(
-        index='userId',
-        columns='movieId',
-        values='rating'
-    ).fillna(0)
-    
-    # Calculate user similarity
-    user_similarity = cosine_similarity(user_item_matrix)
-    
-    # Find similar users
-    user_idx = user_item_matrix.index.get_loc(user_id)
-    similar_users = np.argsort(user_similarity[user_idx])[-10:][::-1]
-    
-    # Get recommendations based on similar users
-    recommendations = []
-    for similar_user in similar_users:
-        user_movies = user_item_matrix.iloc[similar_user]
-        unseen_movies = user_movies[user_movies > 0].index
-        recommendations.extend(unseen_movies)
-    
-    # Remove duplicates and get top N
-    recommendations = list(dict.fromkeys(recommendations))[:n_recommendations]
-    
+    from scipy.sparse import csr_matrix
+    from sklearn.neighbors import NearestNeighbors
+
+    # Reduce dataset: filter active users and popular movies
+    min_user_ratings = 200
+    min_movie_ratings = 100
+
+    active_users = ratings_df['userId'].value_counts()
+    active_users = active_users[active_users >= min_user_ratings].index
+    ratings_df = ratings_df[ratings_df['userId'].isin(active_users)]
+
+    popular_movies = ratings_df['movieId'].value_counts()
+    popular_movies = popular_movies[popular_movies >= min_movie_ratings].index
+    ratings_df = ratings_df[ratings_df['movieId'].isin(popular_movies)]
+
+    # Create sparse user-item matrix
+    user_item_matrix = csr_matrix((
+        ratings_df['rating'], 
+        (ratings_df['userId'], ratings_df['movieId'])
+    ))
+
+    # Get user index mapping
+    user_idx = ratings_df['userId'].drop_duplicates().reset_index(drop=True)
+    if user_id not in user_idx.values:
+        raise ValueError(f"User ID {user_id} not found in the dataset.")
+    user_index = user_idx[user_idx == user_id].index[0]
+
+    # Fit a NearestNeighbors model
+    knn = NearestNeighbors(metric='cosine', algorithm='brute')
+    knn.fit(user_item_matrix)
+
+    # Find the nearest neighbors for the target user
+    distances, indices = knn.kneighbors(user_item_matrix[user_index], n_neighbors=10)
+
+    # Get recommendations from similar users
+    recommendations = set()
+    for similar_user in indices.flatten():
+        if similar_user != user_index:  # Skip self
+            user_movies = user_item_matrix[similar_user].indices
+            recommendations.update(user_movies)
+
+    # Filter and limit recommendations
+    recommendations = list(recommendations)[:n_recommendations]
     return movies_df[movies_df['movieId'].isin(recommendations)][['title', 'genres']]
+
 
 # Content-based recommendation system
 def get_content_based_recommendations(movie_id, movies_df, n_recommendations=10):
