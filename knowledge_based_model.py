@@ -93,6 +93,38 @@ def get_collaborative_recommendations(user_id, ratings_df, movies_df, n_recommen
     
     return movies_df[movies_df['movieId'].isin(recommendations)][['title', 'genres']]
 
+# Content-based recommendation system
+def get_content_based_recommendations(movie_id, movies_df, n_recommendations=10):
+    """
+    Get movie recommendations using content-based filtering.
+    Recommendations are based on the similarity of genres between movies.
+
+    Parameters:
+        movie_id (int): ID of the movie the user likes.
+        movies_df (DataFrame): Movies dataset with columns ['movieId', 'title', 'genres'].
+        n_recommendations (int): Number of recommendations to return.
+
+    Returns:
+        DataFrame: Recommended movies with title and genres.
+    """
+    # Create genre matrix
+    genre_matrix = create_genre_matrix(movies_df)
+    
+    # Get the index of the target movie
+    movie_idx = movies_df[movies_df['movieId'] == movie_id].index[0]
+    
+    # Calculate similarity between the target movie and all other movies
+    similarities = cosine_similarity([genre_matrix.iloc[movie_idx]], genre_matrix)[0]
+    
+    # Get the indices of the most similar movies
+    similar_movie_indices = np.argsort(similarities)[-n_recommendations-1:][::-1]  # Exclude the target movie itself
+    similar_movie_indices = [idx for idx in similar_movie_indices if idx != movie_idx][:n_recommendations]
+    
+    # Fetch recommended movies
+    recommendations = movies_df.iloc[similar_movie_indices]
+    
+    return recommendations[['title', 'genres']]
+
 # Example usage
 if __name__ == "__main__":
     # Create a sample user profile

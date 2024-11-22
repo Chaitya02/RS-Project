@@ -6,6 +6,8 @@ import pandas as pd
 from knowledge_based_model import get_initial_recommendations, get_collaborative_recommendations
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from sqlalchemy import desc, func
 from flask import abort
 
@@ -148,6 +150,44 @@ def get_profile(current_user):
         'favorite_genres': current_user.favorite_genres.split(','),
         'preferred_year_range': [current_user.preferred_year_min, current_user.preferred_year_max]
     })
+
+@app.route('/recommendations/content', methods=['GET'])
+@token_required
+def content_based_recommendations(current_user):
+    try:
+        # Fetch user preferences
+        favorite_genres = current_user.favorite_genres.split(',')
+        preferred_year_min = current_user.preferred_year_min
+        preferred_year_max = current_user.preferred_year_max
+        
+        # Filter movies_df by user's preferred year range
+        filtered_movies = movies_df[
+            (movies_df['year'] >= preferred_year_min) & 
+            (movies_df['year'] <= preferred_year_max)
+        ]
+        
+        # Create a TF-IDF vectorizer for the genres
+        vectorizer = TfidfVectorizer(tokenizer=lambda x: x.split('|'))  # Assuming genres are pipe-separated
+        tfidf_matrix = vectorizer.fit_transform(filtered_movies['genres'])
+        
+        # Generate a user profile vector based on favorite genres
+        user_profile = vectorizer.transform([','.join(favorite_genres)])
+        
+        # Compute cosine similarity between user profile and movies
+        similarity_scores = cosine_similarity(user_profile, tfidf_matrix).flatten()
+        
+        # Add similarity scores to the filtered movies DataFrame
+        filtered_movies['similarity_score'] = similarity_scores
+        
+        # Sort movies by similarity scores
+        recommended_movies = filtered_movies.sort_values(by='similarity_score', ascending=False)
+        
+        # Select the top N recommendations (e.g., 10)
+        top_recommendations = recommended_movies.head(10)
+        
+        return jsonify(top_recommendations.to_dict('records'))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/recommendations', methods=['GET'])
 @token_required
